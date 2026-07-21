@@ -1,24 +1,21 @@
 import json
 import re
-from google import genai
+from openai import OpenAI
 
-MODEL = "gemini-3.1-flash-lite"
+MODEL = "gpt-5.6-luna"
 
 # ── 공통 ──────────────────────────────────────────────────────────────────────
 
 def _client(api_key: str):
-    return genai.Client(api_key=api_key)
+    return OpenAI(api_key=api_key)
 
 
 def _call(client, prompt: str) -> str:
-    response = client.models.generate_content(model=MODEL, contents=prompt)
-    try:
-        return response.text or ""
-    except Exception:
-        if response.candidates:
-            parts = response.candidates[0].content.parts
-            return "".join(p.text for p in parts if hasattr(p, "text"))
-        return ""
+    response = client.chat.completions.create(
+        model=MODEL,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return response.choices[0].message.content or ""
 
 
 def _parse_json(raw: str) -> dict | list:

@@ -5,9 +5,9 @@ from pptx import Presentation
 from pptx.util import Inches, Pt, Emu
 from pptx.dml.color import RGBColor
 from pptx.enum.text import PP_ALIGN
-from google import genai
+from openai import OpenAI
 
-MODEL = "gemini-3.1-flash-lite"
+MODEL = "gpt-5.6-luna"
 
 # ── 색상 팔레트 ───────────────────────────────────────────────────────────────
 BLUE   = RGBColor(0x1F, 0x49, 0x7D)
@@ -35,7 +35,6 @@ def _add_textbox(slide, text, left, top, width, height,
 
 
 def _fill_bg(slide, prs, color: RGBColor):
-    from pptx.util import Emu
     background = slide.background
     fill = background.fill
     fill.solid()
@@ -60,8 +59,6 @@ def _slide_section(prs, title: str, bullets: list[str], score_info: str = ""):
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     _fill_bg(slide, prs, GRAY)
 
-    # 헤더 바
-    from pptx.util import Inches
     hdr = slide.shapes.add_shape(
         1,  # MSO_SHAPE_TYPE.RECTANGLE
         Inches(0), Inches(0), W, Inches(1.2)
@@ -78,7 +75,6 @@ def _slide_section(prs, title: str, bullets: list[str], score_info: str = ""):
                      Inches(10), Inches(0.2), Inches(3), Inches(0.8),
                      size=14, color=RGBColor(0xBD, 0xD7, 0xEE), align=PP_ALIGN.RIGHT)
 
-    # 불릿
     bullet_text = "\n".join(f"▪  {b}" for b in bullets[:7])
     _add_textbox(slide, bullet_text,
                  Inches(0.5), Inches(1.4), Inches(12.3), Inches(5.8),
@@ -109,7 +105,7 @@ def _slide_agenda(prs, toc: dict):
         _add_textbox(slide, right_text, Inches(7), Inches(1.5), Inches(6), Inches(5.5), size=18)
 
 
-# ── Gemini: 슬라이드 불릿 + Q&A 생성 ─────────────────────────────────────────
+# ── OpenAI: 슬라이드 불릿 + Q&A 생성 ─────────────────────────────────────────
 
 BULLET_PROMPT = """아래 제안서 섹션 내용을 발표용 슬라이드 불릿 포인트 5~7개로 요약하세요.
 각 불릿은 한 문장, 명사형 종결어미로 작성하세요.
@@ -135,16 +131,6 @@ JSON만 출력:
 """
 
 
-def _safe_text(response) -> str:
-    try:
-        return response.text or ""
-    except Exception:
-        if response.candidates:
-            parts = response.candidates[0].content.parts
-            return "".join(p.text for p in parts if hasattr(p, "text"))
-        return ""
-
-
 def _parse_json(raw: str) -> dict:
     cleaned = re.sub(r"```(?:json)?", "", raw).strip().strip("`").strip()
     start = cleaned.find("{")
@@ -164,29 +150,27 @@ def generate_ppt(
     rfp_result: dict,
     api_key: str,
 ) -> bytes:
-    client = genai.Client(api_key=api_key)
+    client = OpenAI(api_key=api_key)
     prs = Presentation()
     prs.slide_width  = W
     prs.slide_height = H
 
-    # 표지
     _slide_title(prs, project_name, "제안발표자료")
-    # 목차
     _slide_agenda(prs, toc)
 
-    # 섹션별 슬라이드
     for sec in toc.get("toc", []):
         title   = sec["title"]
         content = sections_draft.get(title, "")
 
-        # Gemini로 불릿 생성
         try:
             prompt = BULLET_PROMPT.format(title=title, content=content[:3000])
-            resp   = client.models.generate_content(model=MODEL, contents=prompt)
-            parsed = _parse_json(_safe_text(resp))
+            resp = client.chat.completions.create(
+                model=MODEL,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            parsed = _parse_json(resp.choices[0].message.content or "")
             bullets = parsed.get("bullets", [])
         except Exception:
-            # 폴백: 첫 줄 추출
             bullets = [l.strip("- ").strip() for l in content.split("\n") if l.strip() and not l.startswith("#")][:6]
 
         if not bullets:
@@ -194,7 +178,6 @@ def generate_ppt(
 
         _slide_section(prs, title, bullets, sec.get("score_basis", ""))
 
-    # 마무리 슬라이드
     _slide_title(prs, "감사합니다", project_name)
 
     buf = io.BytesIO()
@@ -212,7 +195,7 @@ def generate_qa_word(
     from docx.shared import Pt, RGBColor as DRGBColor
     from docx.enum.text import WD_ALIGN_PARAGRAPH
 
-    client = genai.Client(api_key=api_key)
+    client = OpenAI(api_key=api_key)
     section_titles = [s["title"] for s in toc.get("toc", [])]
 
     prompt = QA_PROMPT.format(
@@ -222,13 +205,15 @@ def generate_qa_word(
     )
 
     try:
-        resp   = client.models.generate_content(model=MODEL, contents=prompt)
-        parsed = _parse_json(_safe_text(resp))
+        resp = client.chat.completions.create(
+            model=MODEL,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        parsed = _parse_json(resp.choices[0].message.content or "")
         qa_list = parsed.get("qa", [])
     except Exception as e:
         qa_list = [{"question": f"생성 오류: {e}", "answer": ""}]
 
-    # Word 작성
     doc = Document()
     style = doc.styles["Normal"]
     style.font.name = "맑은 고딕"
